@@ -1,6 +1,5 @@
 use r2pipe::R2Pipe;
 use serde::Serialize;
-use serde_json;
 use serde_json::Value;
 use std::env;
 use std::fs::File;
@@ -128,7 +127,7 @@ fn process_file(path: String, yara_rules_file: String) -> FileInfo {
     result
 }
 
-pub fn yara(path: String, yara_rules_file: String) -> String {
+fn yara(path: String, yara_rules_file: String) -> String {
     let err = "yara processing error".to_string();
     match Command::new("yara")
         .arg("-f")
