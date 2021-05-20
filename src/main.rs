@@ -8,6 +8,45 @@ use std::time::Duration;
 
 const TIMEOUT: u64 = 1;
 
+struct FileInfo {
+    name: String,
+    size: usize,
+    format: String,
+    bintype: String,
+    compiler: Vec<String>,
+    lang: String,
+    machine: String,
+    os: String,
+    strings: Vec<String>,
+    imports: Vec<ImportInfo>,
+    sections: Vec<BlockInfo>,
+    segments: Vec<BlockInfo>,
+    links: Vec<String>,
+    zignatures: Vec<Zignature>,
+}
+
+struct ImportInfo {
+    lib: String,
+    name: String,
+}
+
+struct BlockInfo {
+    name: String,
+    size: usize,
+    ssdeep: String,
+    entropy: f32,
+}
+
+struct Zignature {
+    name: String,
+    bytes: Vec<u8>,
+    mask: String,
+    bbsum: usize,
+    addr: usize,
+    n_vars: usize,
+    entropy: f32,
+}
+
 fn process_file(path: String) -> String {
     let failure = "{\"error\": \"unknown error\"}".to_string();
 
