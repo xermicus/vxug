@@ -1,56 +1,78 @@
+use serde::Serialize;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-const TIMEOUT: u64 = 1;
-
+#[derive(Serialize, Default)]
 struct FileInfo {
-    name: String,
-    size: usize,
-    format: String,
-    bintype: String,
-    compiler: Vec<String>,
-    lang: String,
-    machine: String,
-    os: String,
-    strings: Vec<String>,
-    imports: Vec<ImportInfo>,
-    sections: Vec<BlockInfo>,
-    segments: Vec<BlockInfo>,
-    links: Vec<String>,
-    zignatures: Vec<Zignature>,
+    pub error: Option<String>,
+    pub name: String,
+    pub size: usize,
+    pub format: String,
+    pub bintype: String,
+    pub compiler: Vec<String>,
+    pub lang: String,
+    pub machine: String,
+    pub os: String,
+    pub strings: Vec<String>,
+    pub imports: Vec<ImportInfo>,
+    pub sections: Vec<BlockInfo>,
+    pub segments: Vec<BlockInfo>,
+    pub links: Vec<String>,
+    pub zignatures: Vec<Zignature>,
+    pub dumpinfo: String,
+    pub yara: String,
 }
 
+#[derive(Serialize)]
 struct ImportInfo {
-    lib: String,
-    name: String,
+    pub lib: String,
+    pub name: String,
 }
 
+#[derive(Serialize)]
 struct BlockInfo {
-    name: String,
-    size: usize,
-    ssdeep: String,
-    entropy: f32,
+    pub name: String,
+    pub size: usize,
+    pub ssdeep: String,
+    pub entropy: f32,
 }
 
+#[derive(Serialize)]
 struct Zignature {
-    name: String,
-    bytes: Vec<u8>,
-    mask: String,
-    bbsum: usize,
-    addr: usize,
-    n_vars: usize,
-    entropy: f32,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub mask: String,
+    pub bbsum: usize,
+    pub addr: usize,
+    pub n_vars: usize,
+    pub entropy: f32,
 }
 
-fn process_file(path: String) -> String {
-    let failure = "{\"error\": \"unknown error\"}".to_string();
+fn process_file(path: String, yara_rules_file: String) -> String {
+    let mut result = FileInfo::default();
+    result.name = path.split('/').last().unwrap().to_string();
+    result.yara = yara(path, yara_rules_file);
+    serde_json::to_string(&result).expect("serialization failure")
+}
 
-    failure
+pub fn yara(path: String, yara_rules_file: String) -> String {
+    let err = "yara processing error".to_string();
+    match Command::new("yara")
+        .arg("-f")
+        .arg("-w")
+        .arg(&yara_rules_file)
+        .arg(&path)
+        .output()
+    {
+        Ok(result) => String::from_utf8(result.stdout).unwrap_or(err),
+        _ => err,
+    }
 }
 
 fn spawn_worker(
@@ -58,15 +80,27 @@ fn spawn_worker(
     in_queue: Receiver<String>,
     notify: Sender<usize>,
 ) -> thread::JoinHandle<()> {
+    let timeout = env::var("WORKER_TIMEOUT")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse()
+        .unwrap_or(10);
+    let yara_rules_file = env::var("YARA_RULES_FILE").expect("please set YARA_RULES_FILE env var");
+    if !Path::new(&yara_rules_file).is_file() {
+        panic!("YARA_RULES_FILE is not a file")
+    }
+
     thread::spawn(move || {
-        let _ = notify.send(id);
+        if notify.send(id).is_err() {
+            return;
+        }
         while let Ok(file) = in_queue.recv() {
             let (tx, rx): (Sender<String>, Receiver<String>) = channel();
             let mut out_file = file.clone();
             out_file.push_str(".json");
             let f = file.clone();
-            thread::spawn(move || tx.send(process_file(f)).unwrap());
-            match rx.recv_timeout(Duration::from_secs(TIMEOUT)) {
+            let y = yara_rules_file.clone();
+            thread::spawn(move || tx.send(process_file(f, y)).unwrap());
+            match rx.recv_timeout(Duration::from_secs(timeout)) {
                 Ok(result) => write_result_file(out_file, result),
                 _ => println!("ERROR: file {} timeout or panic", &file),
             }
@@ -85,7 +119,10 @@ fn write_result_file(dest: String, content: String) {
 
 fn main() {
     let args: Vec<_> = env::args().collect();
-    let usage = format!("Usage: {} <input_dir> <output_dir>", args.get(0).unwrap());
+    let usage = format!(
+        "Usage: {} <yara_rules_file> <input_dir>",
+        args.get(0).unwrap()
+    );
     let workdir = Path::new(args.get(1).expect(&usage));
     if !workdir.is_dir() {
         panic!("{}", usage)
