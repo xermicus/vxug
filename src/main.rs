@@ -1,4 +1,7 @@
+use r2pipe::R2Pipe;
 use serde::Serialize;
+use serde_json;
+use serde_json::Value;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
@@ -12,10 +15,11 @@ use std::time::Duration;
 struct FileInfo {
     pub error: Option<String>,
     pub name: String,
-    pub size: usize,
+    pub arch: String,
+    pub size: u64,
     pub format: String,
     pub bintype: String,
-    pub compiler: Vec<String>,
+    pub compiler: String,
     pub lang: String,
     pub machine: String,
     pub os: String,
@@ -38,7 +42,7 @@ struct ImportInfo {
 #[derive(Serialize)]
 struct BlockInfo {
     pub name: String,
-    pub size: usize,
+    pub size: u64,
     pub ssdeep: String,
     pub entropy: f32,
 }
@@ -48,17 +52,80 @@ struct Zignature {
     pub name: String,
     pub bytes: Vec<u8>,
     pub mask: String,
-    pub bbsum: usize,
-    pub addr: usize,
-    pub n_vars: usize,
+    pub bbsum: u64,
+    pub addr: u64,
+    pub n_vars: u64,
     pub entropy: f32,
 }
 
-fn process_file(path: String, yara_rules_file: String) -> String {
-    let mut result = FileInfo::default();
-    result.name = path.split('/').last().unwrap().to_string();
-    result.yara = yara(path, yara_rules_file);
-    serde_json::to_string(&result).expect("serialization failure")
+fn process_file(path: String, yara_rules_file: String) -> FileInfo {
+    let mut result = FileInfo {
+        name: path.split('/').last().unwrap().to_string(),
+        yara: yara(path.clone(), yara_rules_file),
+        ..Default::default()
+    };
+    let err = || Some("radare2 analysis failure".to_string());
+    let mut r2 = match R2Pipe::spawn(&path, None) {
+        Ok(pipe) => pipe,
+        _ => {
+            result.error = err();
+            return result;
+        }
+    };
+    let trim = |s: &serde_json::Value| {
+        s.to_string()
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .to_string()
+    };
+    match r2.cmdj("ij") {
+        Ok(json) => {
+            result.format = trim(&json["core"]["format"]);
+            result.arch = trim(&json["bin"]["arch"]);
+            if let Some(size) = json["bin"]["size"].as_u64() {
+                result.size = size;
+            }
+            result.bintype = trim(&json["bin"]["bintype"]);
+            result.compiler = trim(&json["bin"]["compiler"]);
+            result.lang = trim(&json["bin"]["lang"]);
+            result.machine = trim(&json["bin"]["machine"]);
+            result.os = trim(&json["bin"]["os"]);
+        }
+        _ => {
+            result.error = err();
+            return result;
+        }
+    }
+    match r2.cmdj("izj") {
+        Ok(json) => {
+            if let Value::Array(strings) = json {
+                for string in strings {
+                    result.strings.push(trim(&string["string"]))
+                }
+            }
+        }
+        _ => {
+            result.error = err();
+            return result;
+        }
+    }
+    match r2.cmdj("iij") {
+        Ok(json) => {
+            if let Value::Array(imports) = json {
+                for import in imports {
+                    result.imports.push(ImportInfo {
+                        name: trim(&import["name"]),
+                        lib: trim(&import["lib"]),
+                    })
+                }
+            }
+        }
+        _ => {
+            result.error = err();
+            return result;
+        }
+    }
+    result
 }
 
 pub fn yara(path: String, yara_rules_file: String) -> String {
@@ -99,10 +166,20 @@ fn spawn_worker(
             out_file.push_str(".json");
             let f = file.clone();
             let y = yara_rules_file.clone();
-            thread::spawn(move || tx.send(process_file(f, y)).unwrap());
+            thread::spawn(move || {
+                let info = process_file(f, y);
+                let jsonstr = serde_json::to_string(&info).expect("serialization failure");
+                tx.send(jsonstr).unwrap()
+            });
             match rx.recv_timeout(Duration::from_secs(timeout)) {
                 Ok(result) => write_result_file(out_file, result),
-                _ => println!("ERROR: file {} timeout or panic", &file),
+                _ => {
+                    println!("ERROR: file {} timeout or panic", &file);
+                    write_result_file(
+                        out_file,
+                        "{\"error\": \"timeout or panic during analysis\"}".to_string(),
+                    )
+                }
             }
             if notify.send(id).is_err() {
                 break;
