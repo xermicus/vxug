@@ -38,12 +38,12 @@ struct ImportInfo {
     pub name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct BlockInfo {
     pub name: String,
     pub size: u64,
-    pub ssdeep: String,
-    pub entropy: f32,
+    pub ssdeep: Option<String>,
+    pub entropy: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +115,64 @@ fn process_file(path: String, yara_rules_file: String) -> FileInfo {
                     result.imports.push(ImportInfo {
                         name: trim(&import["name"]),
                         lib: trim(&import["lib"]),
+                    })
+                }
+            }
+        }
+        _ => {
+            result.error = err();
+            return result;
+        }
+    }
+    match r2.cmdj("iSj") {
+        Ok(json) => {
+            if let Value::Array(sections) = json {
+                for section in sections {
+                    let name = trim(&section["name"]);
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let size = match section["size"].as_u64() {
+                        Some(v) => v,
+                        _ => continue,
+                    };
+                    result.sections.push(BlockInfo {
+                        name,
+                        size,
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+        _ => {
+            result.error = err();
+            return result;
+        }
+    }
+    match r2.cmdj("iSSj") {
+        Ok(json) => {
+            if let Value::Array(segments) = json {
+                for segment in segments {
+                    let name = trim(&segment["name"]);
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let size = match segment["size"].as_u64() {
+                        Some(v) => v,
+                        _ => continue,
+                    };
+                    let entropy = match r2.cmd(&format!("ph entropy {} @ segment.{}", size, name)) {
+                        Ok(v) => v.parse::<f32>().ok(),
+                        _ => None,
+                    };
+                    let ssdeep = r2
+                        .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
+                        .ok();
+                    result.segments.push(BlockInfo {
+                        name,
+                        size,
+                        entropy,
+                        ssdeep,
                     })
                 }
             }
