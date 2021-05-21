@@ -12,6 +12,8 @@ use std::time::Duration;
 
 #[derive(Serialize, Default)]
 struct FileInfo {
+    #[serde(skip_serializing)]
+    pub path: String,
     pub error: Vec<&'static str>,
     pub name: String,
     pub arch: String,
@@ -38,6 +40,7 @@ fn jstr(v: &Value) -> String {
 impl FileInfo {
     fn new(path: String) -> Self {
         FileInfo {
+            path: path.clone(),
             name: path.split('/').last().unwrap().to_string(),
             ..Default::default()
         }
@@ -139,7 +142,7 @@ impl FileInfo {
                         let ssdeep = r2
                             .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
                             .ok()
-                            .and_then(|v| Some(v.trim().to_string()));
+                            .map(|v| v.trim().to_string());
                         self.segments.push(BlockInfo {
                             name,
                             size,
@@ -202,19 +205,19 @@ impl FileInfo {
                         let ssdeep = r2
                             .cmd(&format!("ph ssdeep {} @ {}", size, name))
                             .ok()
-                            .and_then(|v| Some(v.trim().to_string()));
+                            .map(|v| v.trim().to_string());
                         let entropy = r2
                             .cmd(&format!("ph entropy {} @ {}", size, name))
                             .ok()
                             .and_then(|v| v.trim().parse::<f32>().ok());
-                        let block = BlockInfo {
+                        let function = BlockInfo {
                             name,
                             size,
                             ssdeep,
                             entropy,
                         };
                         self.zignatures.push(Zignature {
-                            block,
+                            function,
                             bytes,
                             mask,
                             bbsum,
@@ -226,13 +229,37 @@ impl FileInfo {
             }
             _ => self.error.push("strings"),
         }
-
         self
     }
 
-    fn finish(&self, mut r2: R2Pipe) -> Result<String, serde_json::Error> {
+    fn anal_basic(&mut self, yara_rules_file: String) {
+        let mut r2 = match spawn_r2(&self.path) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error.push(e);
+                return;
+            }
+        };
+        self.info(&mut r2)
+            .imports(&mut r2)
+            .strings(&mut r2)
+            .sections(&mut r2)
+            .segments(&mut r2)
+            .links(&mut r2)
+            .yara(yara_rules_file);
         r2.close();
-        serde_json::to_string(self)
+    }
+
+    fn anal_advanced(&mut self) {
+        let mut r2 = match spawn_r2(&self.path) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error.push(e);
+                return;
+            }
+        };
+        self.zignatures(&mut r2);
+        r2.close();
     }
 }
 
@@ -252,7 +279,7 @@ struct BlockInfo {
 
 #[derive(Serialize)]
 struct Zignature {
-    pub block: BlockInfo,
+    pub function: BlockInfo,
     pub bytes: String,
     pub mask: String,
     pub bbsum: u64,
@@ -260,28 +287,15 @@ struct Zignature {
     pub n_vars: u64,
 }
 
-fn process_file(path: String, yara_rules_file: String) -> String {
-    let mut r2 = match R2Pipe::spawn(
-        &path,
+fn spawn_r2(path: &str) -> Result<R2Pipe, &'static str> {
+    R2Pipe::spawn(
+        path,
         Some(R2PipeSpawnOptions {
             exepath: "r2".to_string(),
             args: vec!["-Q", "-S", "-2"],
         }),
-    ) {
-        Ok(pipe) => pipe,
-        _ => return "{\"error\": \"radare2 spawn fail\"}".to_string(),
-    };
-    FileInfo::new(path)
-        .info(&mut r2)
-        .imports(&mut r2)
-        .strings(&mut r2)
-        .sections(&mut r2)
-        .segments(&mut r2)
-        .links(&mut r2)
-        .zignatures(&mut r2)
-        .yara(yara_rules_file)
-        .finish(r2)
-        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
+    )
+    .map_err(|_| "{\"error\": \"radare2 spawn fail\"}")
 }
 
 fn spawn_worker(
@@ -303,22 +317,45 @@ fn spawn_worker(
             return;
         }
         while let Ok(file) = in_queue.recv() {
-            let (tx, rx): (Sender<String>, Receiver<String>) = channel();
+            let (tx, rx): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let mut out_file = file.clone();
             out_file.push_str(".json");
-            let f = file.clone();
+
             let y = yara_rules_file.clone();
-            thread::spawn(move || tx.send(process_file(f, y)).unwrap());
-            match rx.recv_timeout(Duration::from_secs(timeout)) {
-                Ok(result) => write_result_file(out_file, result),
-                _ => {
-                    println!("ERROR: file {} timeout or panic", &file);
-                    write_result_file(
-                        out_file,
-                        "{\"error\": \"timeout or panic during analysis\"}".to_string(),
-                    )
+            let mut info = FileInfo::new(file.clone());
+            let res_q = tx.clone();
+            thread::spawn(move || {
+                info.anal_basic(y);
+                res_q.send(info).unwrap();
+            });
+            let basic = rx.recv_timeout(Duration::from_secs(timeout));
+
+            let mut info = FileInfo::new(file.clone());
+            thread::spawn(move || {
+                info.anal_advanced();
+                tx.send(info).unwrap();
+            });
+            let advanced = rx.recv_timeout(Duration::from_secs(timeout));
+
+            match (basic, advanced) {
+                (Ok(mut b), Ok(a)) => {
+                    b.zignatures = a.zignatures;
+                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"));
                 }
+                (Ok(mut b), _) => {
+                    b.error.push("advanced analysis timeout or panic");
+                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"))
+                }
+                (_, Ok(mut a)) => {
+                    a.error.push("basic analysis timeout or panic");
+                    write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"))
+                }
+                _ => write_result_file(
+                    &out_file,
+                    "{\"error\": \"timeout or panic during analysis\"}",
+                ),
             }
+
             if notify.send(id).is_err() {
                 break;
             }
@@ -326,8 +363,8 @@ fn spawn_worker(
     })
 }
 
-fn write_result_file(dest: String, content: String) {
-    let err_msg = format!("can not write result file {}", &dest);
+fn write_result_file(dest: &str, content: &str) {
+    let err_msg = format!("can not write result file {}", dest);
     let mut buffer = File::create(dest).expect(&err_msg);
     buffer.write_all(content.as_bytes()).expect(&err_msg);
 }
@@ -343,7 +380,7 @@ fn main() {
         panic!("{}", usage)
     }
 
-    let n_workers = num_cpus::get();
+    let n_workers = num_cpus::get() * 2;
     let mut workers = Vec::with_capacity(n_workers);
     let (nf_tx, nf_rx) = channel();
     for n in 0..n_workers {
