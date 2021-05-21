@@ -1,4 +1,4 @@
-use r2pipe::R2Pipe;
+use r2pipe::{R2Pipe, R2PipeSpawnOptions};
 use serde::Serialize;
 use serde_json::Value;
 use std::env;
@@ -132,19 +132,19 @@ impl FileInfo {
                             Some(v) => v,
                             _ => continue,
                         };
-                        let entropy =
-                            match r2.cmd(&format!("ph entropy {} @ segment.{}", size, name)) {
-                                Ok(v) => v.parse::<f32>().ok(),
-                                _ => None,
-                            };
+                        let entropy = r2
+                            .cmd(&format!("ph entropy {} @ segment.{}", size, name))
+                            .ok()
+                            .and_then(|v| v.trim().parse::<f32>().ok());
                         let ssdeep = r2
                             .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
-                            .ok();
+                            .ok()
+                            .and_then(|v| Some(v.trim().to_string()));
                         self.segments.push(BlockInfo {
                             name,
                             size,
-                            entropy,
                             ssdeep,
+                            entropy,
                         })
                     }
                 }
@@ -173,6 +173,53 @@ impl FileInfo {
         self
     }
 
+    fn zignatures(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        let _ = r2.cmd("aa;zaF");
+        match r2.cmdj("zj") {
+            Ok(json) => {
+                if let Value::Array(zignatures) = json {
+                    for zign in zignatures {
+                        let name = jstr(&zign["name"]);
+                        let bytes = jstr(&zign["bytes"]);
+                        let size = bytes.len() as u64;
+                        let mask = jstr(&zign["mask"]);
+                        let bbsum = zign["graph"]["bbsum"].as_u64().unwrap_or(0);
+                        let addr = zign["addr"].as_u64().unwrap_or(0);
+                        let n_vars = match zign["vars"].as_array() {
+                            Some(v) => v.len() as u64,
+                            _ => 0,
+                        };
+                        let ssdeep = r2
+                            .cmd(&format!("ph ssdeep {} @ {}", size, name))
+                            .ok()
+                            .and_then(|v| Some(v.trim().to_string()));
+                        let entropy = r2
+                            .cmd(&format!("ph entropy {} @ {}", size, name))
+                            .ok()
+                            .and_then(|v| v.trim().parse::<f32>().ok());
+                        let block = BlockInfo {
+                            name,
+                            size,
+                            ssdeep,
+                            entropy,
+                        };
+                        self.zignatures.push(Zignature {
+                            block,
+                            bytes,
+                            mask,
+                            bbsum,
+                            addr,
+                            n_vars,
+                        })
+                    }
+                }
+            }
+            _ => self.error.push("strings"),
+        }
+
+        self
+    }
+
     fn as_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -194,17 +241,22 @@ struct BlockInfo {
 
 #[derive(Serialize)]
 struct Zignature {
-    pub name: String,
-    pub bytes: Vec<u8>,
+    pub block: BlockInfo,
+    pub bytes: String,
     pub mask: String,
     pub bbsum: u64,
     pub addr: u64,
     pub n_vars: u64,
-    pub entropy: f32,
 }
 
 fn process_file(path: String, yara_rules_file: String) -> String {
-    let mut r2 = match R2Pipe::spawn(&path, None) {
+    let mut r2 = match R2Pipe::spawn(
+        &path,
+        Some(R2PipeSpawnOptions {
+            exepath: "r2".to_string(),
+            args: vec!["-Q", "-S", "-2"],
+        }),
+    ) {
         Ok(pipe) => pipe,
         _ => return "{\"error\": \"radare2 spawn fail\"}".to_string(),
     };
@@ -215,6 +267,7 @@ fn process_file(path: String, yara_rules_file: String) -> String {
         .sections(&mut r2)
         .segments(&mut r2)
         .links(&mut r2)
+        .zignatures(&mut r2)
         .yara(yara_rules_file)
         .as_string()
         .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
