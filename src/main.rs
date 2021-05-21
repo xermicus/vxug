@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, path::PathBuf};
 
 #[derive(Serialize, Default)]
@@ -60,7 +60,7 @@ impl FileInfo {
 
     fn magic(&mut self, r2: &mut R2Pipe) -> &mut Self {
         let _ = r2.cmd("e search.from = 0");
-        let _ = r2.cmd("e search.to = 0xff");
+        let _ = r2.cmd("e search.to = 0x3ff");
         match r2.cmdj("/mj") {
             Ok(json) => {
                 if let Value::Array(magics) = json {
@@ -335,7 +335,7 @@ fn spawn_worker(
     out_dir: PathBuf,
 ) -> thread::JoinHandle<()> {
     let timeout = env::var("WORKER_TIMEOUT")
-        .unwrap_or_else(|_| "1".to_string())
+        .unwrap_or_else(|_| "10".to_string())
         .parse()
         .unwrap_or(10);
     let yara_rules_file = env::var("YARA_RULES_FILE").expect("please set YARA_RULES_FILE env var");
@@ -426,11 +426,14 @@ fn main() {
         workers.push((tx, spawn_worker(n, rx, nf_tx.clone(), outdir.to_path_buf())))
     }
 
+    let mut count: usize = 0;
+    let start = Instant::now();
     for entry in workdir
         .read_dir()
         .expect("failed to read input dir")
         .flatten()
     {
+        count += 1;
         let file = entry.path().display().to_string();
         println!("processing {}", &file);
         let w = nf_rx.recv().expect("workers drained out");
@@ -442,10 +445,18 @@ fn main() {
             .unwrap_or_else(|_| panic!("worker {} died unexpectedly", w))
     }
 
-    println!("Waiting for workers to finish...");
+    println!("waiting for workers to finish ...");
     drop(nf_rx);
     for worker in workers {
         drop(worker.0);
         worker.1.join().unwrap()
     }
+
+    let stop = start.elapsed().as_secs();
+    println!(
+        "done {} samples in {}s ({:.2} samples/s)",
+        count,
+        stop,
+        count as f64 / stop as f64
+    )
 }
