@@ -12,7 +12,7 @@ use std::time::Duration;
 
 #[derive(Serialize, Default)]
 struct FileInfo {
-    pub error: Option<String>,
+    pub error: Vec<&'static str>,
     pub name: String,
     pub arch: String,
     pub size: u64,
@@ -28,8 +28,154 @@ struct FileInfo {
     pub segments: Vec<BlockInfo>,
     pub links: Vec<String>,
     pub zignatures: Vec<Zignature>,
-    pub dumpinfo: String,
     pub yara: String,
+}
+
+fn jstr(v: &Value) -> String {
+    v.as_str().unwrap_or_default().to_string()
+}
+
+impl FileInfo {
+    fn new(path: String) -> Self {
+        FileInfo {
+            name: path.split('/').last().unwrap().to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn info(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("ij") {
+            Ok(json) => {
+                self.format = jstr(&json["core"]["format"]);
+                self.arch = jstr(&json["bin"]["arch"]);
+                if let Some(size) = json["bin"]["size"].as_u64() {
+                    self.size = size;
+                }
+                self.bintype = jstr(&json["bin"]["bintype"]);
+                self.compiler = jstr(&json["bin"]["compiler"]);
+                self.lang = jstr(&json["bin"]["lang"]);
+                self.machine = jstr(&json["bin"]["machine"]);
+                self.os = jstr(&json["bin"]["os"]);
+            }
+            _ => self.error.push("info"),
+        }
+        self
+    }
+
+    fn strings(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("izj") {
+            Ok(json) => {
+                if let Value::Array(strings) = json {
+                    for string in strings {
+                        self.strings.push(jstr(&string["string"]))
+                    }
+                }
+            }
+            _ => self.error.push("strings"),
+        }
+        self
+    }
+
+    fn imports(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("iij") {
+            Ok(json) => {
+                if let Value::Array(imports) = json {
+                    for import in imports {
+                        self.imports.push(ImportInfo {
+                            name: jstr(&import["name"]),
+                            lib: jstr(&import["lib"]),
+                        })
+                    }
+                }
+            }
+            _ => self.error.push("imports"),
+        }
+        self
+    }
+
+    fn sections(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("iSj") {
+            Ok(json) => {
+                if let Value::Array(sections) = json {
+                    for section in sections {
+                        let name = jstr(&section["name"]);
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let size = match section["size"].as_u64() {
+                            Some(v) => v,
+                            _ => continue,
+                        };
+                        self.sections.push(BlockInfo {
+                            name,
+                            size,
+                            ..Default::default()
+                        })
+                    }
+                }
+            }
+            _ => self.error.push("sections"),
+        }
+        self
+    }
+
+    fn segments(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("iSSj") {
+            Ok(json) => {
+                if let Value::Array(segments) = json {
+                    for segment in segments {
+                        let name = jstr(&segment["name"]);
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let size = match segment["size"].as_u64() {
+                            Some(v) => v,
+                            _ => continue,
+                        };
+                        let entropy =
+                            match r2.cmd(&format!("ph entropy {} @ segment.{}", size, name)) {
+                                Ok(v) => v.parse::<f32>().ok(),
+                                _ => None,
+                            };
+                        let ssdeep = r2
+                            .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
+                            .ok();
+                        self.segments.push(BlockInfo {
+                            name,
+                            size,
+                            entropy,
+                            ssdeep,
+                        })
+                    }
+                }
+            }
+            _ => self.error.push("segments"),
+        }
+        self
+    }
+
+    fn links(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("ilj") {
+            Ok(json) => {
+                if let Value::Array(links) = json {
+                    for link in links {
+                        self.links.push(jstr(&link))
+                    }
+                }
+            }
+            _ => self.error.push("strings"),
+        }
+        self
+    }
+
+    fn yara(&mut self, yara_rules_file: String) -> &mut Self {
+        self.yara = yara(self.name.clone(), yara_rules_file);
+        self
+    }
+
+    fn as_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
 }
 
 #[derive(Serialize)]
@@ -57,132 +203,21 @@ struct Zignature {
     pub entropy: f32,
 }
 
-fn process_file(path: String, yara_rules_file: String) -> FileInfo {
-    let mut result = FileInfo {
-        name: path.split('/').last().unwrap().to_string(),
-        yara: yara(path.clone(), yara_rules_file),
-        ..Default::default()
-    };
-    let err = || Some("radare2 analysis failure".to_string());
+fn process_file(path: String, yara_rules_file: String) -> String {
     let mut r2 = match R2Pipe::spawn(&path, None) {
         Ok(pipe) => pipe,
-        _ => {
-            result.error = err();
-            return result;
-        }
+        _ => return "{\"error\": \"radare2 spawn fail\"}".to_string(),
     };
-    let trim = |s: &serde_json::Value| {
-        s.to_string()
-            .trim_start_matches('"')
-            .trim_end_matches('"')
-            .to_string()
-    };
-    match r2.cmdj("ij") {
-        Ok(json) => {
-            result.format = trim(&json["core"]["format"]);
-            result.arch = trim(&json["bin"]["arch"]);
-            if let Some(size) = json["bin"]["size"].as_u64() {
-                result.size = size;
-            }
-            result.bintype = trim(&json["bin"]["bintype"]);
-            result.compiler = trim(&json["bin"]["compiler"]);
-            result.lang = trim(&json["bin"]["lang"]);
-            result.machine = trim(&json["bin"]["machine"]);
-            result.os = trim(&json["bin"]["os"]);
-        }
-        _ => {
-            result.error = err();
-            return result;
-        }
-    }
-    match r2.cmdj("izj") {
-        Ok(json) => {
-            if let Value::Array(strings) = json {
-                for string in strings {
-                    result.strings.push(trim(&string["string"]))
-                }
-            }
-        }
-        _ => {
-            result.error = err();
-            return result;
-        }
-    }
-    match r2.cmdj("iij") {
-        Ok(json) => {
-            if let Value::Array(imports) = json {
-                for import in imports {
-                    result.imports.push(ImportInfo {
-                        name: trim(&import["name"]),
-                        lib: trim(&import["lib"]),
-                    })
-                }
-            }
-        }
-        _ => {
-            result.error = err();
-            return result;
-        }
-    }
-    match r2.cmdj("iSj") {
-        Ok(json) => {
-            if let Value::Array(sections) = json {
-                for section in sections {
-                    let name = trim(&section["name"]);
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let size = match section["size"].as_u64() {
-                        Some(v) => v,
-                        _ => continue,
-                    };
-                    result.sections.push(BlockInfo {
-                        name,
-                        size,
-                        ..Default::default()
-                    })
-                }
-            }
-        }
-        _ => {
-            result.error = err();
-            return result;
-        }
-    }
-    match r2.cmdj("iSSj") {
-        Ok(json) => {
-            if let Value::Array(segments) = json {
-                for segment in segments {
-                    let name = trim(&segment["name"]);
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let size = match segment["size"].as_u64() {
-                        Some(v) => v,
-                        _ => continue,
-                    };
-                    let entropy = match r2.cmd(&format!("ph entropy {} @ segment.{}", size, name)) {
-                        Ok(v) => v.parse::<f32>().ok(),
-                        _ => None,
-                    };
-                    let ssdeep = r2
-                        .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
-                        .ok();
-                    result.segments.push(BlockInfo {
-                        name,
-                        size,
-                        entropy,
-                        ssdeep,
-                    })
-                }
-            }
-        }
-        _ => {
-            result.error = err();
-            return result;
-        }
-    }
-    result
+    FileInfo::new(path)
+        .info(&mut r2)
+        .imports(&mut r2)
+        .strings(&mut r2)
+        .sections(&mut r2)
+        .segments(&mut r2)
+        .links(&mut r2)
+        .yara(yara_rules_file)
+        .as_string()
+        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
 }
 
 fn yara(path: String, yara_rules_file: String) -> String {
@@ -223,11 +258,7 @@ fn spawn_worker(
             out_file.push_str(".json");
             let f = file.clone();
             let y = yara_rules_file.clone();
-            thread::spawn(move || {
-                let info = process_file(f, y);
-                let jsonstr = serde_json::to_string(&info).expect("serialization failure");
-                tx.send(jsonstr).unwrap()
-            });
+            thread::spawn(move || tx.send(process_file(f, y)).unwrap());
             match rx.recv_timeout(Duration::from_secs(timeout)) {
                 Ok(result) => write_result_file(out_file, result),
                 _ => {
