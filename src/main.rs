@@ -1,7 +1,6 @@
 use r2pipe::{R2Pipe, R2PipeSpawnOptions};
 use serde::Serialize;
 use serde_json::Value;
-use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
@@ -9,6 +8,7 @@ use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
+use std::{env, path::PathBuf};
 
 #[derive(Serialize, Default)]
 struct FileInfo {
@@ -16,6 +16,8 @@ struct FileInfo {
     pub path: String,
     pub error: Vec<&'static str>,
     pub name: String,
+    pub sha256: String,
+    pub magic: Vec<String>,
     pub arch: String,
     pub size: u64,
     pub format: String,
@@ -44,6 +46,30 @@ impl FileInfo {
             name: path.split('/').last().unwrap().to_string(),
             ..Default::default()
         }
+    }
+
+    fn sha256(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("itj") {
+            Ok(json) => {
+                self.sha256 = jstr(&json["sha256"]);
+            }
+            _ => self.error.push("sha256 hash"),
+        }
+        self
+    }
+
+    fn magic(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        match r2.cmdj("/mj") {
+            Ok(json) => {
+                if let Value::Array(magics) = json {
+                    for magic in magics {
+                        self.magic.push(jstr(&magic["info"]))
+                    }
+                }
+            }
+            _ => self.error.push("magic"),
+        }
+        self
     }
 
     fn info(&mut self, r2: &mut R2Pipe) -> &mut Self {
@@ -241,6 +267,8 @@ impl FileInfo {
             }
         };
         self.info(&mut r2)
+            .sha256(&mut r2)
+            .magic(&mut r2)
             .imports(&mut r2)
             .strings(&mut r2)
             .sections(&mut r2)
@@ -302,6 +330,7 @@ fn spawn_worker(
     id: usize,
     in_queue: Receiver<String>,
     notify: Sender<usize>,
+    out_dir: PathBuf,
 ) -> thread::JoinHandle<()> {
     let timeout = env::var("WORKER_TIMEOUT")
         .unwrap_or_else(|_| "1".to_string())
@@ -317,36 +346,45 @@ fn spawn_worker(
             return;
         }
         while let Ok(file) = in_queue.recv() {
-            let (tx, rx): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
-            let mut out_file = file.clone();
-            out_file.push_str(".json");
-
-            let y = yara_rules_file.clone();
             let mut info = FileInfo::new(file.clone());
-            let res_q = tx.clone();
+            let mut out_file = out_dir.clone();
+            out_file.push(format!("{}.json", &info.name));
+
+            let (tx, rx): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
+            let y = yara_rules_file.clone();
             thread::spawn(move || {
                 info.anal_basic(y);
-                res_q.send(info).unwrap();
+                let _ = tx.send(info);
             });
-            let basic = rx.recv_timeout(Duration::from_secs(timeout));
+            let mut basic = rx.recv_timeout(Duration::from_secs(timeout));
 
+            let (tx_a, rx_a): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let mut info = FileInfo::new(file.clone());
             thread::spawn(move || {
                 info.anal_advanced();
-                tx.send(info).unwrap();
+                let _ = tx_a.send(info);
             });
-            let advanced = rx.recv_timeout(Duration::from_secs(timeout));
+            let advanced = rx_a.recv_timeout(Duration::from_secs(timeout));
+            if basic.is_err() {
+                // maybe basic info now finished
+                basic = rx
+                    .try_recv()
+                    .map_err(|_| std::sync::mpsc::RecvTimeoutError::Timeout)
+            }
 
             match (basic, advanced) {
                 (Ok(mut b), Ok(a)) => {
                     b.zignatures = a.zignatures;
-                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"));
+                    write_result_file(
+                        out_file.as_path(),
+                        &serde_json::to_string(&b).expect("serfail"),
+                    );
                 }
-                (Ok(mut b), _) => {
+                (Ok(mut b), Err(_)) => {
                     b.error.push("advanced analysis timeout or panic");
                     write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"))
                 }
-                (_, Ok(mut a)) => {
+                (Err(_), Ok(mut a)) => {
                     a.error.push("basic analysis timeout or panic");
                     write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"))
                 }
@@ -363,20 +401,18 @@ fn spawn_worker(
     })
 }
 
-fn write_result_file(dest: &str, content: &str) {
-    let err_msg = format!("can not write result file {}", dest);
+fn write_result_file(dest: &Path, content: &str) {
+    let err_msg = format!("can not write result file {}", dest.display());
     let mut buffer = File::create(dest).expect(&err_msg);
     buffer.write_all(content.as_bytes()).expect(&err_msg);
 }
 
 fn main() {
     let args: Vec<_> = env::args().collect();
-    let usage = format!(
-        "Usage: {} <yara_rules_file> <input_dir>",
-        args.get(0).unwrap()
-    );
+    let usage = format!("Usage: {} <input_dir> <output_dir>", args.get(0).unwrap());
     let workdir = Path::new(args.get(1).expect(&usage));
-    if !workdir.is_dir() {
+    let outdir = Path::new(args.get(2).expect(&usage));
+    if !workdir.is_dir() || !outdir.is_dir() {
         panic!("{}", usage)
     }
 
@@ -385,7 +421,7 @@ fn main() {
     let (nf_tx, nf_rx) = channel();
     for n in 0..n_workers {
         let (tx, rx) = channel();
-        workers.push((tx, spawn_worker(n, rx, nf_tx.clone())))
+        workers.push((tx, spawn_worker(n, rx, nf_tx.clone(), outdir.to_path_buf())))
     }
 
     for entry in workdir
