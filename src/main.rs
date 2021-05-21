@@ -169,7 +169,17 @@ impl FileInfo {
     }
 
     fn yara(&mut self, yara_rules_file: String) -> &mut Self {
-        self.yara = yara(self.name.clone(), yara_rules_file);
+        let err = "yara processing error".to_string();
+        self.yara = match Command::new("yara")
+            .arg("-f")
+            .arg("-w")
+            .arg(&yara_rules_file)
+            .arg(&self.name)
+            .output()
+        {
+            Ok(result) => String::from_utf8(result.stdout).unwrap_or(err),
+            _ => err,
+        };
         self
     }
 
@@ -220,7 +230,8 @@ impl FileInfo {
         self
     }
 
-    fn as_string(&self) -> Result<String, serde_json::Error> {
+    fn finish(&self, mut r2: R2Pipe) -> Result<String, serde_json::Error> {
+        r2.close();
         serde_json::to_string(self)
     }
 }
@@ -269,22 +280,8 @@ fn process_file(path: String, yara_rules_file: String) -> String {
         .links(&mut r2)
         .zignatures(&mut r2)
         .yara(yara_rules_file)
-        .as_string()
+        .finish(r2)
         .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
-}
-
-fn yara(path: String, yara_rules_file: String) -> String {
-    let err = "yara processing error".to_string();
-    match Command::new("yara")
-        .arg("-f")
-        .arg("-w")
-        .arg(&yara_rules_file)
-        .arg(&path)
-        .output()
-    {
-        Ok(result) => String::from_utf8(result.stdout).unwrap_or(err),
-        _ => err,
-    }
 }
 
 fn spawn_worker(
