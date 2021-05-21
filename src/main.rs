@@ -59,6 +59,8 @@ impl FileInfo {
     }
 
     fn magic(&mut self, r2: &mut R2Pipe) -> &mut Self {
+        let _ = r2.cmd("e search.from = 0");
+        let _ = r2.cmd("e search.to = 0xff");
         match r2.cmdj("/mj") {
             Ok(json) => {
                 if let Value::Array(magics) = json {
