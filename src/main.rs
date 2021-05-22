@@ -34,6 +34,7 @@ struct FileInfo {
     pub zignatures: Vec<Zignature>,
     pub yara: String,
 }
+
 #[derive(Serialize)]
 struct ImportInfo {
     pub lib: String,
@@ -418,7 +419,7 @@ fn main() {
         panic!("{}", usage)
     }
 
-    let n_workers = num_cpus::get() * 2;
+    let n_workers = num_cpus::get() + 2;
     let mut workers = Vec::with_capacity(n_workers);
     let (nf_tx, nf_rx) = channel();
     for n in 0..n_workers {
