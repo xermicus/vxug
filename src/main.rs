@@ -34,6 +34,29 @@ struct FileInfo {
     pub zignatures: Vec<Zignature>,
     pub yara: String,
 }
+#[derive(Serialize)]
+struct ImportInfo {
+    pub lib: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+struct BlockInfo {
+    pub name: String,
+    pub size: u64,
+    pub ssdeep: Option<String>,
+    pub entropy: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct Zignature {
+    pub function: BlockInfo,
+    pub bytes: String,
+    pub mask: String,
+    pub bbsum: u64,
+    pub addr: u64,
+    pub n_vars: u64,
+}
 
 fn jstr(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
@@ -292,30 +315,6 @@ impl FileInfo {
         self.zignatures(&mut r2);
         r2.close();
     }
-}
-
-#[derive(Serialize)]
-struct ImportInfo {
-    pub lib: String,
-    pub name: String,
-}
-
-#[derive(Serialize, Default)]
-struct BlockInfo {
-    pub name: String,
-    pub size: u64,
-    pub ssdeep: Option<String>,
-    pub entropy: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct Zignature {
-    pub function: BlockInfo,
-    pub bytes: String,
-    pub mask: String,
-    pub bbsum: u64,
-    pub addr: u64,
-    pub n_vars: u64,
 }
 
 fn spawn_r2(path: &str) -> Result<R2Pipe, &'static str> {
