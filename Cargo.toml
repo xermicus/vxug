@@ -11,3 +11,4 @@ num_cpus = "1"
 r2pipe = { git = "https://github.com/xermicus/r2pipe.rs", branch = "murder" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hex = "0.4"

@@ -125,9 +125,9 @@ impl FileInfo {
     }
 
     fn sections(&mut self, r2: &mut R2Pipe) -> &mut Self {
-        match r2.cmdj("iSj") {
+        match r2.cmdj("iSj entropy,ssdeep") {
             Ok(json) => {
-                if let Value::Array(sections) = json {
+                if let Value::Array(sections) = &json["sections"] {
                     for section in sections {
                         let name = jstr(&section["name"]);
                         if name.is_empty() {
@@ -137,10 +137,15 @@ impl FileInfo {
                             Some(v) => v,
                             _ => continue,
                         };
+                        let entropy = jstr(&section["entropy"]).parse::<f32>().ok();
+                        let ssdeep = hex::decode(jstr(&section["ssdeep"]).trim_end_matches('0'))
+                            .ok()
+                            .and_then(|buf| String::from_utf8(buf).ok());
                         self.sections.push(BlockInfo {
                             name,
                             size,
-                            ..Default::default()
+                            ssdeep,
+                            entropy,
                         })
                     }
                 }
@@ -151,9 +156,9 @@ impl FileInfo {
     }
 
     fn segments(&mut self, r2: &mut R2Pipe) -> &mut Self {
-        match r2.cmdj("iSSj") {
+        match r2.cmdj("iSSj entropy,ssdeep") {
             Ok(json) => {
-                if let Value::Array(segments) = json {
+                if let Value::Array(segments) = &json["segments"] {
                     for segment in segments {
                         let name = jstr(&segment["name"]);
                         if name.is_empty() {
@@ -163,14 +168,10 @@ impl FileInfo {
                             Some(v) => v,
                             _ => continue,
                         };
-                        let entropy = r2
-                            .cmd(&format!("ph entropy {} @ segment.{}", size, name))
+                        let entropy = jstr(&segment["entropy"]).parse::<f32>().ok();
+                        let ssdeep = hex::decode(jstr(&segment["ssdeep"]).trim_end_matches('0'))
                             .ok()
-                            .and_then(|v| v.trim().parse::<f32>().ok());
-                        let ssdeep = r2
-                            .cmd(&format!("ph ssdeep {} @ segment.{}", size, name))
-                            .ok()
-                            .map(|v| v.trim().to_string());
+                            .and_then(|buf| String::from_utf8(buf).ok());
                         self.segments.push(BlockInfo {
                             name,
                             size,
