@@ -138,7 +138,7 @@ impl FileInfo {
                             _ => continue,
                         };
                         let entropy = jstr(&section["entropy"]).parse::<f32>().ok();
-                        let ssdeep = hex::decode(jstr(&section["ssdeep"]).trim_end_matches('0'))
+                        let ssdeep = hex::decode(jstr(&section["ssdeep"]).trim_end_matches("00"))
                             .ok()
                             .and_then(|buf| String::from_utf8(buf).ok());
                         self.sections.push(BlockInfo {
@@ -169,7 +169,7 @@ impl FileInfo {
                             _ => continue,
                         };
                         let entropy = jstr(&segment["entropy"]).parse::<f32>().ok();
-                        let ssdeep = hex::decode(jstr(&segment["ssdeep"]).trim_end_matches('0'))
+                        let ssdeep = hex::decode(jstr(&segment["ssdeep"]).trim_end_matches("00"))
                             .ok()
                             .and_then(|buf| String::from_utf8(buf).ok());
                         self.segments.push(BlockInfo {
