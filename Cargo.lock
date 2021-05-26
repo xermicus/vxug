@@ -58,7 +58,6 @@ dependencies = [
 [[package]]
 name = "r2pipe"
 version = "0.5.0"
-source = "git+https://github.com/radareorg/r2pipe.rs#8dae2fcb73f28550780ba5d3c8e77636d54ca339"
 dependencies = [
  "libc",
  "serde",

@@ -285,48 +285,39 @@ impl FileInfo {
         self
     }
 
-    fn anal_basic(&mut self, yara_rules_file: String) {
-        let mut r2 = match spawn_r2(&self.path) {
-            Ok(v) => v,
-            Err(e) => {
-                self.error.push(e);
-                return;
-            }
-        };
-        self.info(&mut r2)
-            .sha256(&mut r2)
-            .magic(&mut r2)
-            .imports(&mut r2)
-            .strings(&mut r2)
-            .sections(&mut r2)
-            .segments(&mut r2)
-            .links(&mut r2)
+    fn anal_basic(&mut self, r2: &mut R2Pipe, yara_rules_file: String) {
+        self.info(r2)
+            .sha256(r2)
+            .magic(r2)
+            .imports(r2)
+            .strings(r2)
+            .sections(r2)
+            .segments(r2)
+            .links(r2)
             .yara(yara_rules_file);
-        r2.close();
     }
 
-    fn anal_advanced(&mut self) {
-        let mut r2 = match spawn_r2(&self.path) {
-            Ok(v) => v,
-            Err(e) => {
-                self.error.push(e);
-                return;
-            }
-        };
-        self.zignatures(&mut r2);
-        r2.close();
+    fn anal_advanced(&mut self, r2: &mut R2Pipe) {
+        self.zignatures(r2);
     }
 }
 
-fn spawn_r2(path: &str) -> Result<R2Pipe, &'static str> {
-    R2Pipe::spawn(
+fn spawn_r2(path: &str) -> Result<(R2Pipe, std::process::Child), &'static str> {
+    if let Ok(mut r2) = R2Pipe::spawn(
         path,
         Some(R2PipeSpawnOptions {
             exepath: "r2".to_string(),
             args: vec!["-Q", "-S", "-2"],
         }),
-    )
-    .map_err(|_| "{\"error\": \"radare2 spawn fail\"}")
+    ) {
+        let child = if let R2Pipe::Pipe(x) = &mut r2 {
+            x.take_child().expect("Cant take r2 child process")
+        } else {
+            panic!("never happens")
+        };
+        return Ok((r2, child));
+    }
+    Err("{\"error\": \"radare2 spawn fail\"}")
 }
 
 fn spawn_worker(
@@ -355,17 +346,21 @@ fn spawn_worker(
 
             let (tx, rx): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let y = yara_rules_file.clone();
+            let (mut r2_b, mut ch_b) = spawn_r2(&info.path).expect("can't spawn r2");
             thread::spawn(move || {
-                info.anal_basic(y);
+                info.anal_basic(&mut r2_b, y);
                 let _ = tx.send(info);
+                r2_b.close();
             });
             let mut basic = rx.recv_timeout(Duration::from_secs(timeout));
 
             let (tx_a, rx_a): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let mut info = FileInfo::new(file.clone());
+            let (mut r2_a, mut ch_a) = spawn_r2(&info.path).expect("can't spawn r2");
             thread::spawn(move || {
-                info.anal_advanced();
+                info.anal_advanced(&mut r2_a);
                 let _ = tx_a.send(info);
+                r2_a.close();
             });
             let advanced = rx_a.recv_timeout(Duration::from_secs(timeout));
             if basic.is_err() {
@@ -378,23 +373,41 @@ fn spawn_worker(
             match (basic, advanced) {
                 (Ok(mut b), Ok(a)) => {
                     b.zignatures = a.zignatures;
+                    thread::spawn(move || {
+                        let _ = ch_b.wait();
+                        let _ = ch_a.wait();
+                    });
                     write_result_file(
                         out_file.as_path(),
                         &serde_json::to_string(&b).expect("serfail"),
                     );
                 }
                 (Ok(mut b), Err(_)) => {
+                    thread::spawn(move || {
+                        let _ = ch_b.wait();
+                        let _ = ch_a.kill();
+                    });
                     b.error.push("advanced analysis timeout or panic");
                     write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"))
                 }
                 (Err(_), Ok(mut a)) => {
+                    thread::spawn(move || {
+                        let _ = ch_a.wait();
+                        let _ = ch_b.kill();
+                    });
                     a.error.push("basic analysis timeout or panic");
                     write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"))
                 }
-                _ => write_result_file(
-                    &out_file,
-                    "{\"error\": \"timeout or panic during analysis\"}",
-                ),
+                _ => {
+                    thread::spawn(move || {
+                        let _ = ch_a.kill();
+                        let _ = ch_b.kill();
+                    });
+                    write_result_file(
+                        &out_file,
+                        "{\"error\": \"timeout or panic during analysis\"}",
+                    );
+                }
             }
 
             if notify.send(id).is_err() {
@@ -450,7 +463,7 @@ fn main() {
     drop(nf_rx);
     for worker in workers {
         drop(worker.0);
-        worker.1.join().unwrap()
+        let _ = worker.1.join();
     }
 
     let stop = start.elapsed().as_secs();
