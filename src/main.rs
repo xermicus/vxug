@@ -374,46 +374,40 @@ fn spawn_worker(
                     .map_err(|_| std::sync::mpsc::RecvTimeoutError::Timeout)
             }
 
-            match (basic, advanced) {
+            thread::spawn(move || match (basic, advanced) {
                 (Ok(mut b), Ok(a)) => {
                     b.zignatures = a.zignatures;
-                    thread::spawn(move || {
-                        let _ = ch_b.wait();
-                        let _ = ch_a.wait();
-                    });
+                    let _ = ch_b.wait();
+                    let _ = ch_a.wait();
                     write_result_file(
                         out_file.as_path(),
                         &serde_json::to_string(&b).expect("serfail"),
                     );
                 }
                 (Ok(mut b), Err(_)) => {
-                    thread::spawn(move || {
-                        let _ = ch_b.wait();
-                        let _ = ch_a.kill();
-                    });
+                    let _ = ch_a.kill();
+                    let _ = ch_b.wait();
+                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"));
                     b.error.push("advanced analysis timeout or panic");
-                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"))
+                    FAILURES.lock().unwrap().push(file);
                 }
                 (Err(_), Ok(mut a)) => {
-                    thread::spawn(move || {
-                        let _ = ch_a.wait();
-                        let _ = ch_b.kill();
-                    });
+                    let _ = ch_b.kill();
+                    let _ = ch_a.wait();
                     a.error.push("basic analysis timeout or panic");
-                    write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"))
+                    write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"));
+                    FAILURES.lock().unwrap().push(file);
                 }
                 _ => {
-                    thread::spawn(move || {
-                        let _ = ch_a.kill();
-                        let _ = ch_b.kill();
-                        FAILURES.lock().unwrap().push(file);
-                    });
+                    let _ = ch_a.kill();
+                    let _ = ch_b.kill();
                     write_result_file(
                         &out_file,
                         "{\"error\": \"timeout or panic during analysis\"}",
                     );
+                    FAILURES.lock().unwrap().push(file);
                 }
-            }
+            });
 
             if notify.send(id).is_err() {
                 break;
@@ -475,7 +469,7 @@ fn main() {
     let failures = FAILURES.lock().expect("failures");
     failures.iter().for_each(|fail| println!("error {}", fail));
     println!(
-        "total failures: {} ({}%)",
+        "total failed: {} ({}%)",
         failures.len(),
         (failures.len() / count) * 100
     );
