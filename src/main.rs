@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use r2pipe::{R2Pipe, R2PipeSpawnOptions};
 use serde::Serialize;
 use serde_json::Value;
@@ -6,9 +7,12 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, path::PathBuf};
+
+static FAILURES: Lazy<Arc<Mutex<Vec<String>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 
 #[derive(Serialize, Default)]
 struct FileInfo {
@@ -402,6 +406,7 @@ fn spawn_worker(
                     thread::spawn(move || {
                         let _ = ch_a.kill();
                         let _ = ch_b.kill();
+                        FAILURES.lock().unwrap().push(file);
                     });
                     write_result_file(
                         &out_file,
@@ -467,6 +472,13 @@ fn main() {
     }
 
     let stop = start.elapsed().as_secs();
+    let failures = FAILURES.lock().expect("failures");
+    failures.iter().for_each(|fail| println!("error {}", fail));
+    println!(
+        "total failures: {} ({}%)",
+        failures.len(),
+        (failures.len() / count) * 100
+    );
     println!(
         "done {} samples in {}s ({:.2} samples/s)",
         count,

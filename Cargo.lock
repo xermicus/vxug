@@ -38,6 +38,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "once_cell"
+version = "1.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af8b08b04175473088b46763e51ee54da5f9a164bc162f615b91bc179dbf15a3"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -58,6 +64,7 @@ dependencies = [
 [[package]]
 name = "r2pipe"
 version = "0.5.0"
+source = "git+https://github.com/radareorg/r2pipe.rs#9310015b189d0b604b023c49c692c9a149090b3e"
 dependencies = [
  "libc",
  "serde",
@@ -146,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "num_cpus",
+ "once_cell",
  "r2pipe",
  "serde",
  "serde_json",
