@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 use r2pipe::{R2Pipe, R2PipeSpawnOptions};
 use serde::Serialize;
 use serde_json::Value;
@@ -7,12 +6,9 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, path::PathBuf};
-
-static FAILURES: Lazy<Arc<Mutex<Vec<String>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 
 #[derive(Serialize, Default)]
 struct FileInfo {
@@ -350,7 +346,16 @@ fn spawn_worker(
 
             let (tx, rx): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let y = yara_rules_file.clone();
-            let (mut r2_b, mut ch_b) = spawn_r2(&info.path).expect("can't spawn r2");
+            let (mut r2_b, mut ch_b) = match spawn_r2(&info.path) {
+                Ok(x) => x,
+                _ => {
+                    println!("error {} r2 spawn fail", &file);
+                    if notify.send(id).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             thread::spawn(move || {
                 info.anal_basic(&mut r2_b, y);
                 let _ = tx.send(info);
@@ -360,7 +365,16 @@ fn spawn_worker(
 
             let (tx_a, rx_a): (Sender<FileInfo>, Receiver<FileInfo>) = channel();
             let mut info = FileInfo::new(file.clone());
-            let (mut r2_a, mut ch_a) = spawn_r2(&info.path).expect("can't spawn r2");
+            let (mut r2_a, mut ch_a) = match spawn_r2(&info.path) {
+                Ok(x) => x,
+                _ => {
+                    println!("error {} r2 spawn fail", &file);
+                    if notify.send(id).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
             thread::spawn(move || {
                 info.anal_advanced(&mut r2_a);
                 let _ = tx_a.send(info);
@@ -374,40 +388,50 @@ fn spawn_worker(
                     .map_err(|_| std::sync::mpsc::RecvTimeoutError::Timeout)
             }
 
-            thread::spawn(move || match (basic, advanced) {
+            let result = match (basic, advanced) {
                 (Ok(mut b), Ok(a)) => {
                     b.zignatures = a.zignatures;
-                    let _ = ch_b.wait();
-                    let _ = ch_a.wait();
-                    write_result_file(
-                        out_file.as_path(),
-                        &serde_json::to_string(&b).expect("serfail"),
-                    );
+                    thread::spawn(move || {
+                        let _ = ch_b.wait();
+                        let _ = ch_a.wait();
+                    });
+                    serde_json::to_string(&b)
+                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
                 }
                 (Ok(mut b), Err(_)) => {
-                    let _ = ch_a.kill();
-                    let _ = ch_b.wait();
-                    write_result_file(&out_file, &serde_json::to_string(&b).expect("serfail"));
+                    thread::spawn(move || {
+                        let _ = ch_a.kill();
+                        let _ = ch_a.wait();
+                        let _ = ch_b.wait();
+                    });
+                    println!("error {} advanced analysis timeout or panic", &file);
                     b.error.push("advanced analysis timeout or panic");
-                    FAILURES.lock().unwrap().push(file);
+                    serde_json::to_string(&b)
+                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
                 }
                 (Err(_), Ok(mut a)) => {
-                    let _ = ch_b.kill();
-                    let _ = ch_a.wait();
+                    thread::spawn(move || {
+                        let _ = ch_b.kill();
+                        let _ = ch_b.wait();
+                        let _ = ch_a.wait();
+                    });
+                    println!("error {} basic analysis timeout or panic", &file);
                     a.error.push("basic analysis timeout or panic");
-                    write_result_file(&out_file, &serde_json::to_string(&a).expect("serfail"));
-                    FAILURES.lock().unwrap().push(file);
+                    serde_json::to_string(&a)
+                        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
                 }
                 _ => {
-                    let _ = ch_a.kill();
-                    let _ = ch_b.kill();
-                    write_result_file(
-                        &out_file,
-                        "{\"error\": \"timeout or panic during analysis\"}",
-                    );
-                    FAILURES.lock().unwrap().push(file);
+                    thread::spawn(move || {
+                        let _ = ch_a.kill();
+                        let _ = ch_b.kill();
+                        let _ = ch_a.wait();
+                        let _ = ch_b.wait();
+                    });
+                    println!("error {} analysis timeout or panic", &file);
+                    "{\"error\": \"timeout or panic during analysis\"}".to_string()
                 }
-            });
+            };
+            write_result_file(out_file.as_path(), &result);
 
             if notify.send(id).is_err() {
                 break;
@@ -466,13 +490,6 @@ fn main() {
     }
 
     let stop = start.elapsed().as_secs();
-    let failures = FAILURES.lock().expect("failures");
-    failures.iter().for_each(|fail| println!("error {}", fail));
-    println!(
-        "total failed: {} ({}%)",
-        failures.len(),
-        (failures.len() / count) * 100
-    );
     println!(
         "done {} samples in {}s ({:.2} samples/s)",
         count,
