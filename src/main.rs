@@ -86,11 +86,9 @@ impl FileInfo {
         let _ = r2.cmd("e search.from = 0");
         let _ = r2.cmd("e search.to = 0x3ff");
         match r2.cmdj("/mj") {
-            Ok(json) => {
-                if let Value::Array(magics) = json {
-                    for magic in magics {
-                        self.magic.push(jstr(&magic["info"]))
-                    }
+            Ok(Value::Array(magics)) => {
+                for magic in magics {
+                    self.magic.push(jstr(&magic["info"]))
                 }
             }
             _ => self.error.push("magic"),
@@ -119,11 +117,9 @@ impl FileInfo {
 
     fn strings(&mut self, r2: &mut R2Pipe) -> &mut Self {
         match r2.cmdj("izj") {
-            Ok(json) => {
-                if let Value::Array(strings) = json {
-                    for string in strings {
-                        self.strings.push(jstr(&string["string"]))
-                    }
+            Ok(Value::Array(strings)) => {
+                for string in strings {
+                    self.strings.push(jstr(&string["string"]))
                 }
             }
             _ => self.error.push("strings"),
@@ -133,14 +129,12 @@ impl FileInfo {
 
     fn imports(&mut self, r2: &mut R2Pipe) -> &mut Self {
         match r2.cmdj("iij") {
-            Ok(json) => {
-                if let Value::Array(imports) = json {
-                    for import in imports {
-                        self.imports.push(ImportInfo {
-                            name: jstr(&import["name"]),
-                            lib: jstr(&import["lib"]),
-                        })
-                    }
+            Ok(Value::Array(imports)) => {
+                for import in imports {
+                    self.imports.push(ImportInfo {
+                        name: jstr(&import["name"]),
+                        lib: jstr(&import["lib"]),
+                    })
                 }
             }
             _ => self.error.push("imports"),
@@ -212,11 +206,9 @@ impl FileInfo {
 
     fn links(&mut self, r2: &mut R2Pipe) -> &mut Self {
         match r2.cmdj("ilj") {
-            Ok(json) => {
-                if let Value::Array(links) = json {
-                    for link in links {
-                        self.links.push(jstr(&link))
-                    }
+            Ok(Value::Array(links)) => {
+                for link in links {
+                    self.links.push(jstr(&link))
                 }
             }
             _ => self.error.push("strings"),
@@ -242,42 +234,40 @@ impl FileInfo {
     fn zignatures(&mut self, r2: &mut R2Pipe) -> &mut Self {
         let _ = r2.cmd("aa;zaF");
         match r2.cmdj("zj") {
-            Ok(json) => {
-                if let Value::Array(zignatures) = json {
-                    for zign in zignatures {
-                        let name = jstr(&zign["name"]);
-                        let bytes = jstr(&zign["bytes"]);
-                        let size = bytes.len() as u64;
-                        let mask = jstr(&zign["mask"]);
-                        let bbsum = zign["graph"]["bbsum"].as_u64().unwrap_or(0);
-                        let addr = zign["addr"].as_u64().unwrap_or(0);
-                        let n_vars = match zign["vars"].as_array() {
-                            Some(v) => v.len() as u64,
-                            _ => 0,
-                        };
-                        let ssdeep = r2
-                            .cmd(&format!("ph ssdeep {} @ {}", size, name))
-                            .ok()
-                            .map(|v| v.trim().to_string());
-                        let entropy = r2
-                            .cmd(&format!("ph entropy {} @ {}", size, name))
-                            .ok()
-                            .and_then(|v| v.trim().parse::<f32>().ok());
-                        let function = BlockInfo {
-                            name,
-                            size,
-                            ssdeep,
-                            entropy,
-                        };
-                        self.zignatures.push(Zignature {
-                            function,
-                            bytes,
-                            mask,
-                            bbsum,
-                            addr,
-                            n_vars,
-                        })
-                    }
+            Ok(Value::Array(zignatures)) => {
+                for zign in zignatures {
+                    let name = jstr(&zign["name"]);
+                    let bytes = jstr(&zign["bytes"]);
+                    let size = bytes.len() as u64;
+                    let mask = jstr(&zign["mask"]);
+                    let bbsum = zign["graph"]["bbsum"].as_u64().unwrap_or(0);
+                    let addr = zign["addr"].as_u64().unwrap_or(0);
+                    let n_vars = match zign["vars"].as_array() {
+                        Some(v) => v.len() as u64,
+                        _ => 0,
+                    };
+                    let ssdeep = r2
+                        .cmd(&format!("ph ssdeep {} @ {}", size, name))
+                        .ok()
+                        .map(|v| v.trim().to_string());
+                    let entropy = r2
+                        .cmd(&format!("ph entropy {} @ {}", size, name))
+                        .ok()
+                        .and_then(|v| v.trim().parse::<f32>().ok());
+                    let function = BlockInfo {
+                        name,
+                        size,
+                        ssdeep,
+                        entropy,
+                    };
+                    self.zignatures.push(Zignature {
+                        function,
+                        bytes,
+                        mask,
+                        bbsum,
+                        addr,
+                        n_vars,
+                    })
                 }
             }
             _ => self.error.push("strings"),
