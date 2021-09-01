@@ -222,7 +222,7 @@ impl FileInfo {
             .arg("-f")
             .arg("-w")
             .arg(&yara_rules_file)
-            .arg(&self.name)
+            .arg(&self.path)
             .output()
         {
             Ok(result) => String::from_utf8(result.stdout).unwrap_or(err),
