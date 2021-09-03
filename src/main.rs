@@ -225,7 +225,9 @@ impl FileInfo {
             .arg(&self.path)
             .output()
         {
-            Ok(result) => String::from_utf8(result.stdout).unwrap_or(err),
+            Ok(result) => String::from_utf8(result.stdout).map_or(err, |rule_matches| {
+                rule_matches.replace(&self.path, "").replace("\n", "")
+            }),
             _ => err,
         };
         self
